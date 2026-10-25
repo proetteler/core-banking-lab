@@ -31,3 +31,7 @@ Patrick muss jede Zeile und jede Entscheidung im Vorstellungsgespräch erklären
 
 ## Ehrlichkeit
 - Kein Avaloq-Code, keine Avaloq-Interna. Nur öffentlich bekannte Konzepte nachbilden.
+
+## Git
+- Commit-Messages auf Englisch, im Imperativ (z. B. "Add docker-compose.yml for Oracle").
+- Dateien einzeln mit git add hinzufügen, nicht git add .
