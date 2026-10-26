@@ -7,3 +7,6 @@
 # Editor
 .vscode/*
 !.vscode/extensions.json
+
+# Experiments
+scratch/
