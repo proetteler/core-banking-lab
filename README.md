@@ -40,7 +40,7 @@ docker compose logs oracle | grep "DATABASE IS READY TO USE"
 docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_USER_PASSWORD@//localhost/FREEPDB1" @install.sql'
 ```
 
-The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order and stops at the first error.
+The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order, stops at the first error and fails if any PL/SQL object is invalid.
 
 ### Connect
 
@@ -66,9 +66,12 @@ After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything fr
 ```
 .
 ├── db/
-│   ├── install.sql      # runs all scripts below in order
+│   ├── install.sql      # runs all scripts below in order, stops on errors or invalid objects
 │   ├── data/            # seed data (internal bank accounts)
 │   │   └── 01_internal_accounts.sql
+│   ├── packages/        # PL/SQL packages (spec .pks, body .pkb)
+│   │   ├── account_api.pks
+│   │   └── account_api.pkb
 │   └── ddl/             # table definitions, run in numeric order
 │       ├── 01_customer.sql
 │       ├── 02_account.sql
