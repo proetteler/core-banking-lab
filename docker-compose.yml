@@ -10,6 +10,7 @@ services:
       APP_USER_PASSWORD: ${APP_USER_PASSWORD}
     volumes:
       - oracle-data:/opt/oracle/oradata
+      - ./db:/opt/cbl/db:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s

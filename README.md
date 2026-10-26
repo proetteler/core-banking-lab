@@ -33,9 +33,14 @@ cp .env.example .env
 # 2. Start the database (the first start takes a few minutes)
 docker compose up -d
 
-# 3. Wait until the status shows "healthy"
-docker compose ps
+# 3. Wait until the database is ready
+docker compose logs oracle | grep "DATABASE IS READY TO USE"
+
+# 4. Install schema and seed data
+docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_USER_PASSWORD@//localhost/FREEPDB1" @install.sql'
 ```
+
+The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order and stops at the first error.
 
 ### Connect
 
@@ -54,22 +59,41 @@ docker compose down      # stop the container, keep the data
 docker compose down -v   # stop the container and DELETE all data (fresh start)
 ```
 
+After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything from scratch.
+
 ## Project structure
 
 ```
 .
+├── db/
+│   ├── install.sql      # runs all scripts below in order
+│   ├── data/            # seed data (internal bank accounts)
+│   │   └── 01_internal_accounts.sql
+│   └── ddl/             # table definitions, run in numeric order
+│       ├── 01_customer.sql
+│       ├── 02_account.sql
+│       ├── 03_booking.sql
+│       └── 04_booking_line.sql
 ├── docker-compose.yml   # Oracle Database Free container
 ├── .env.example         # required environment variables (no secrets)
 └── CLAUDE.md            # working agreements for the AI coding assistant
 ```
 
-More folders (e.g. `db/` for schema and PL/SQL scripts) are added step by step.
+### Data model
+
+```
+customer 1 ── n account 1 ── n booking_line n ── 1 booking
+```
+
+- `account`: customer accounts and internal bank accounts (e.g. cash, fee income)
+- `booking`: booking header (type, booking date, value date, unique reference, reversal link)
+- `booking_line`: one line per account, signed amount (debit +, credit −). The lines of a booking sum to 0.
 
 ## Roadmap
 
 - [x] 1. Setup: Oracle container, connection from VS Code
-- [ ] 2. Architecture frame (arc42): context, scope, quality goals
-- [ ] 3. Data model: customers, accounts, bookings, double-entry bookkeeping
+- [x] 2. Architecture frame (arc42): context, scope, quality goals
+- [x] 3. Data model: customers, accounts, bookings, double-entry bookkeeping
 - [ ] 4. PL/SQL basics: packages, procedures, exceptions, transactions
 - [ ] 5. Booking logic: deposit, transfer, funds check, account locks, fees
 - [ ] 6. Tests with utPLSQL
