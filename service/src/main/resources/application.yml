@@ -7,6 +7,47 @@ spring:
     username: ${DB_USER:CORE_BANK_API}
     password: ${DB_PASSWORD}
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Erst bestätigt, wenn alle In-Sync-Replicas das Event haben
+      acks: all
+      properties:
+        # Idempotenter Producer: keine Duplikate durch interne Producer-Retries
+        enable.idempotence: true
+        # Kurze Timeouts: ist Kafka weg, soll der Publisher schnell aufgeben statt minutenlang zu blockieren
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    consumer:
+      group-id: core-banking-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      # Offset wird nach jeder Order einzeln bestätigt (erst nach Erfolg oder Dead-Letter)
+      ack-mode: record
+
+app:
+  kafka:
+    topics:
+      booking-events: core-banking.booking-events
+      payment-orders: core-banking.payment-orders
+      payment-results: core-banking.payment-results
+
+outbox:
+  publisher:
+    enabled: true
+    poll-interval-ms: 2000
+    batch-size: 50
+    send-timeout-ms: 10000
+  backlog:
+    # Ab diesem Alter des ältesten Events meldet die Health-Gruppe "lagging": true (Status bleibt UP)
+    warn-after-seconds: 300
+
 management:
   endpoints:
     web:
@@ -16,6 +57,12 @@ management:
   endpoint:
     health:
       show-details: never
+      group:
+        # Details nur für den Outbox-Rückstand: /actuator/health/outbox
+        outbox:
+          include: outboxBacklog
+          show-details: always
+          show-components: always
   info:
     env:
       enabled: true
