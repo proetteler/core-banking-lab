@@ -3,3 +3,4 @@
 -- Nur EXECUTE auf die Packages, kein SELECT/INSERT/UPDATE auf Tabellen (Least Privilege).
 GRANT EXECUTE ON booking_api TO core_bank_api;
 GRANT EXECUTE ON account_api TO core_bank_api;
+GRANT EXECUTE ON outbox_api  TO core_bank_api;

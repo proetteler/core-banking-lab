@@ -97,12 +97,12 @@ AS
     -- Schreibt Kopf, Soll- und Haben-Zeile, aktualisiert beide Salden und schreibt das Outbox-Event.
     -- Setzt voraus, dass beide Konten bereits gesperrt und geprüft sind.
     FUNCTION post_booking (
-        p_booking_type      IN booking.booking_type%TYPE,
-        p_debit_account_id  IN account.account_id%TYPE,
-        p_credit_account_id IN account.account_id%TYPE,
-        p_amount            IN booking_line.amount%TYPE,
-        p_currency          IN account.currency_code%TYPE,
-        p_reference         IN booking.reference%TYPE
+        p_booking_type IN booking.booking_type%TYPE,
+        p_debit        IN account%ROWTYPE,
+        p_credit       IN account%ROWTYPE,
+        p_amount       IN booking_line.amount%TYPE,
+        p_currency     IN account.currency_code%TYPE,
+        p_reference    IN booking.reference%TYPE
     ) RETURN booking.booking_id%TYPE
     IS
         v_booking_id booking.booking_id%TYPE;
@@ -119,27 +119,34 @@ AS
 
         -- Soll (+) und Haben (-): Summe = 0
         INSERT INTO booking_line (booking_id, account_id, amount)
-        VALUES (v_booking_id, p_debit_account_id, p_amount);
+        VALUES (v_booking_id, p_debit.account_id, p_amount);
 
         INSERT INTO booking_line (booking_id, account_id, amount)
-        VALUES (v_booking_id, p_credit_account_id, -p_amount);
+        VALUES (v_booking_id, p_credit.account_id, -p_amount);
 
-        UPDATE account SET balance = balance - p_amount WHERE account_id = p_debit_account_id;
-        UPDATE account SET balance = balance + p_amount WHERE account_id = p_credit_account_id;
+        UPDATE account SET balance = balance - p_amount WHERE account_id = p_debit.account_id;
+        UPDATE account SET balance = balance + p_amount WHERE account_id = p_credit.account_id;
 
-        -- Outbox in derselben Transaktion: Event und Buchung gibt es nur zusammen
+        -- Outbox in derselben Transaktion: Event und Buchung gibt es nur zusammen.
+        -- Event-Schema v1: keine internen IDs, nur fachliche Schlüssel (Referenz, Kontonummern).
+        -- eventId ist im Payload gespeichert und bleibt bei jeder Wiederholung gleich (Idempotenz).
         INSERT INTO outbox_event (aggregate_type, aggregate_id, event_type, payload)
         SELECT 'BOOKING',
-               TO_CHAR(v_booking_id),
+               p_reference,
                'BOOKING_CREATED',
                JSON_OBJECT(
-                   'bookingId'       VALUE v_booking_id,
-                   'bookingType'     VALUE p_booking_type,
-                   'reference'       VALUE p_reference,
-                   'debitAccountId'  VALUE p_debit_account_id,
-                   'creditAccountId' VALUE p_credit_account_id,
-                   'amount'          VALUE p_amount,
-                   'currency'        VALUE p_currency
+                   'eventId'            VALUE LOWER(REGEXP_REPLACE(RAWTOHEX(SYS_GUID()),
+                                               '(.{8})(.{4})(.{4})(.{4})(.{12})', '\1-\2-\3-\4-\5')),
+                   'eventType'          VALUE 'BOOKING_CREATED',
+                   'schemaVersion'      VALUE 1,
+                   'occurredAt'         VALUE TO_CHAR(SYS_EXTRACT_UTC(SYSTIMESTAMP),
+                                               'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'),
+                   'bookingReference'   VALUE p_reference,
+                   'bookingType'        VALUE p_booking_type,
+                   'debitAccountNumber' VALUE p_debit.account_number,
+                   'creditAccountNumber' VALUE p_credit.account_number,
+                   'amount'             VALUE p_amount,
+                   'currency'           VALUE p_currency
                    RETURNING CLOB)
         FROM   dual;
 
@@ -184,7 +191,7 @@ AS
         check_currency(v_customer, p_currency);
         check_can_debit(v_cash);
 
-        RETURN post_booking('DEPOSIT', v_cash.account_id, v_customer.account_id,
+        RETURN post_booking('DEPOSIT', v_cash, v_customer,
                             p_amount, p_currency, p_reference);
     END deposit;
 
@@ -220,7 +227,7 @@ AS
                 || ' + Limite ' || v_from.overdraft_limit || ' deckt ' || p_amount || ' nicht');
         END IF;
 
-        RETURN post_booking('TRANSFER', v_from.account_id, v_to.account_id,
+        RETURN post_booking('TRANSFER', v_from, v_to,
                             p_amount, p_currency, p_reference);
     END transfer;
 

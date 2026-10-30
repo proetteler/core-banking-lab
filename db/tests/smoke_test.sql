@@ -20,6 +20,18 @@ DECLARE
     v_outbox_before NUMBER;
     v_outbox_after  NUMBER;
     v_deposit_id  booking.booking_id%TYPE;
+    v_outbox_max_before outbox_event.outbox_event_id%TYPE;
+    v_unpub_before NUMBER;
+    v_rc          SYS_REFCURSOR;
+    v_ev_id       outbox_event.outbox_event_id%TYPE;
+    v_ev_agg_type outbox_event.aggregate_type%TYPE;
+    v_ev_agg_id   outbox_event.aggregate_id%TYPE;
+    v_ev_type     outbox_event.event_type%TYPE;
+    v_ev_payload  outbox_event.payload%TYPE;
+    v_ev_created  outbox_event.created_at%TYPE;
+    v_prev_id     outbox_event.outbox_event_id%TYPE;
+    v_own_id      outbox_event.outbox_event_id%TYPE;
+    v_fetched     NUMBER;
 
     FUNCTION acc_id (p_number IN VARCHAR2) RETURN account.account_id%TYPE
     IS
@@ -55,7 +67,7 @@ BEGIN
     v_ben_blocked := acc_id('CUS-1002-02');
     v_clara_chf   := acc_id('CUS-1003-01');
 
-    SELECT COUNT(*) INTO v_outbox_before FROM outbox_event;
+    SELECT COUNT(*), NVL(MAX(outbox_event_id), 0) INTO v_outbox_before, v_outbox_max_before FROM outbox_event;
     v_bal_anna := bal(v_anna_chf);
     v_bal_ben  := bal(v_ben_chf);
 
@@ -201,15 +213,81 @@ BEGIN
     SELECT COUNT(*) INTO v_outbox_after FROM outbox_event;
     check_that(v_outbox_after - v_outbox_before = 5, 'Outbox: 5 neue Events für 5 erfolgreiche Buchungen');
 
+    -- Event-Format v1 (siehe api/asyncapi.yaml): fachliche Schlüssel, keine internen IDs
     SELECT COUNT(*) INTO v_count
     FROM   outbox_event
     WHERE  aggregate_type = 'BOOKING'
-    AND    aggregate_id   = TO_CHAR(v_deposit_id)
+    AND    aggregate_id   = 'SMOKE-DEP-1'
     AND    event_type     = 'BOOKING_CREATED'
     AND    published_at IS NULL
+    AND    payload IS JSON
+    AND    JSON_VALUE(payload, '$.eventType') = 'BOOKING_CREATED'
+    AND    JSON_VALUE(payload, '$.schemaVersion' RETURNING NUMBER) = 1
+    AND    REGEXP_LIKE(JSON_VALUE(payload, '$.eventId'),
+                       '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    AND    REGEXP_LIKE(JSON_VALUE(payload, '$.occurredAt'),
+                       '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+    AND    JSON_VALUE(payload, '$.bookingReference') = 'SMOKE-DEP-1'
+    AND    JSON_VALUE(payload, '$.bookingType') = 'DEPOSIT'
+    AND    JSON_VALUE(payload, '$.debitAccountNumber') = 'INT-1000'
+    AND    JSON_VALUE(payload, '$.creditAccountNumber') = 'CUS-1001-01'
     AND    JSON_VALUE(payload, '$.amount' RETURNING NUMBER) = 1000
-    AND    JSON_VALUE(payload, '$.reference') = 'SMOKE-DEP-1';
-    check_that(v_count = 1, 'Outbox: Event der Einzahlung mit gültigem JSON-Payload');
+    AND    JSON_VALUE(payload, '$.currency') = 'CHF';
+    check_that(v_count = 1, 'Outbox: Einzahlungs-Event im Format v1');
+
+    SELECT COUNT(*) INTO v_count
+    FROM   outbox_event
+    WHERE  outbox_event_id > v_outbox_max_before
+    AND   (JSON_EXISTS(payload, '$.bookingId')
+        OR JSON_EXISTS(payload, '$.debitAccountId')
+        OR JSON_EXISTS(payload, '$.creditAccountId'));
+    check_that(v_count = 0, 'Outbox: keine internen IDs im Payload');
+
+    -- outbox_api: Rückstand, Reihenfolge, Markierung
+    v_unpub_before := outbox_api.unpublished_count;
+    check_that(v_unpub_before >= 5, 'outbox_api.unpublished_count zählt die neuen Events');
+    check_that(outbox_api.oldest_unpublished_age_seconds >= 0, 'outbox_api.oldest_unpublished_age_seconds liefert ein Alter');
+
+    v_rc := outbox_api.fetch_unpublished(1000);
+    v_prev_id := 0;
+    v_fetched := 0;
+    LOOP
+        FETCH v_rc INTO v_ev_id, v_ev_agg_type, v_ev_agg_id, v_ev_type, v_ev_payload, v_ev_created;
+        EXIT WHEN v_rc%NOTFOUND;
+        IF v_ev_id <= v_prev_id THEN
+            RAISE_APPLICATION_ERROR(-20900, 'FEHLGESCHLAGEN: fetch_unpublished liefert nicht aufsteigend');
+        END IF;
+        v_prev_id := v_ev_id;
+        v_fetched := v_fetched + 1;
+        IF v_ev_agg_id = 'SMOKE-DEP-1' THEN
+            v_own_id := v_ev_id;
+        END IF;
+    END LOOP;
+    CLOSE v_rc;
+    check_that(v_fetched >= 5 AND v_own_id IS NOT NULL, 'outbox_api.fetch_unpublished liefert aufsteigend, inkl. neuer Events');
+
+    v_rc := outbox_api.fetch_unpublished(1);
+    FETCH v_rc INTO v_ev_id, v_ev_agg_type, v_ev_agg_id, v_ev_type, v_ev_payload, v_ev_created;
+    v_fetched := CASE WHEN v_rc%NOTFOUND THEN 0 ELSE 1 END;
+    v_count := 0;
+    IF v_fetched = 1 THEN
+        FETCH v_rc INTO v_ev_id, v_ev_agg_type, v_ev_agg_id, v_ev_type, v_ev_payload, v_ev_created;
+        IF NOT v_rc%NOTFOUND THEN v_count := 1; END IF;
+    END IF;
+    CLOSE v_rc;
+    check_that(v_fetched = 1 AND v_count = 0, 'outbox_api.fetch_unpublished respektiert die Batchgrösse');
+
+    outbox_api.mark_published(v_own_id);
+    SELECT COUNT(*) INTO v_count FROM outbox_event WHERE outbox_event_id = v_own_id AND published_at IS NOT NULL;
+    check_that(v_count = 1, 'outbox_api.mark_published setzt published_at');
+
+    v_raised := FALSE;
+    BEGIN
+        outbox_api.mark_published(v_own_id);
+    EXCEPTION
+        WHEN bank_errors.outbox_event_not_found THEN v_raised := TRUE;
+    END;
+    check_that(v_raised, 'mark_published auf veröffentlichtes Event -> outbox_event_not_found');
 
     DBMS_OUTPUT.PUT_LINE('SMOKE TEST OK');
 END;

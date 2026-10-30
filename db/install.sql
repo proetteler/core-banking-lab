@@ -19,6 +19,8 @@ PROMPT === Packages ===
 @@packages/account_api.pkb
 @@packages/booking_api.pks
 @@packages/booking_api.pkb
+@@packages/outbox_api.pks
+@@packages/outbox_api.pkb
 
 PROMPT === Berechtigungen (Voraussetzung: security/01_api_user.sql als SYSTEM) ===
 @@security/02_api_grants.sql
