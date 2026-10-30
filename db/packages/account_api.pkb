@@ -17,6 +17,23 @@ AS
             RAISE_APPLICATION_ERROR(bank_errors.c_account_not_found,'Konto ' || p_account_number || ' nicht gefunden');
     END get_balance;
 
+    FUNCTION get_account_id (
+        p_account_number IN account.account_number%TYPE
+    ) RETURN account.account_id%TYPE
+    IS
+        v_account_id account.account_id%TYPE;
+    BEGIN
+        SELECT account_id
+        INTO   v_account_id
+        FROM   account
+        WHERE  account_number = p_account_number;
+
+        RETURN v_account_id;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(bank_errors.c_account_not_found, 'Konto ' || p_account_number || ' nicht gefunden');
+    END get_account_id;
+
     PROCEDURE print_account (
         p_account_number IN account.account_number%TYPE
     )

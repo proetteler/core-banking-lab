@@ -59,6 +59,16 @@ BEGIN
     v_bal_anna := bal(v_anna_chf);
     v_bal_ben  := bal(v_ben_chf);
 
+    -- Kontonummer -> ID
+    check_that(account_api.get_account_id('CUS-1001-01') = v_anna_chf, 'get_account_id liefert die ID');
+    v_raised := FALSE;
+    BEGIN
+        v_count := account_api.get_account_id('GIBT-ES-NICHT');
+    EXCEPTION
+        WHEN bank_errors.account_not_found THEN v_raised := TRUE;
+    END;
+    check_that(v_raised, 'get_account_id unbekannt -> account_not_found');
+
     -- Positivtests
     v_deposit_id := booking_api.deposit(v_anna_chf, 1000, 'CHF', 'SMOKE-DEP-1');
     check_that(v_deposit_id IS NOT NULL, 'deposit liefert Buchungs-ID');
