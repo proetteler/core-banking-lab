@@ -86,7 +86,8 @@ After `down -v`, repeat steps 2 to 5 of the quick start to rebuild everything fr
 │   ├── packages/        # PL/SQL packages (spec .pks, body .pkb)
 │   │   ├── bank_errors.pks    # error numbers and named exceptions
 │   │   ├── account_api.pks / .pkb
-│   │   └── booking_api.pks / .pkb   # deposit, transfer
+│   │   ├── booking_api.pks / .pkb   # deposit, transfer
+│   │   └── outbox_api.pks / .pkb    # read and mark outbox events, backlog
 │   ├── testdata/        # demo customers and accounts, loaded separately
 │   │   └── 01_demo_customers_accounts.sql
 │   ├── security/        # database user of the integration service
@@ -100,8 +101,10 @@ After `down -v`, repeat steps 2 to 5 of the quick start to rebuild everything fr
 │       ├── 03_booking.sql
 │       ├── 04_booking_line.sql
 │       └── 05_outbox_event.sql
-├── service/             # Spring Boot integration service (REST in front of the packages)
-├── docker-compose.yml   # Oracle Database Free and the integration service
+├── service/             # Spring Boot integration service (REST, Kafka outbox publisher, payment order consumer)
+├── api/
+│   └── asyncapi.yaml    # Kafka topics and message schemas (AsyncAPI 3)
+├── docker-compose.yml   # Oracle Database Free, Kafka, Kafka UI and the integration service
 ├── .env.example         # required environment variables (no secrets)
 └── CLAUDE.md            # working agreements for the AI coding assistant
 ```
@@ -124,7 +127,7 @@ A Spring Boot 3 / Java 21 service in `service/` that exposes the PL/SQL packages
 
 ```bash
 # needs API_USER_PASSWORD in .env and the database user from quick start step 4
-docker compose up -d --build     # builds the image (runs mvn verify), starts Oracle and the service
+docker compose up -d --build     # builds the image (runs mvn verify), starts Oracle, Kafka and the service
 curl -s http://127.0.0.1:8080/actuator/health
 ```
 
@@ -171,6 +174,79 @@ The `detail` text is fixed per error. The database message is not returned, beca
 - **Account numbers, not internal IDs.** The API identifies accounts by `accountNumber`, the business key. The internal ID is a surrogate key of the database. If it leaked, clients would depend on it and it could be guessed. The service resolves the number with `account_api.get_account_id` in the same transaction as the booking, `booking_api` keeps working with IDs.
 - **Transaction in the service.** `booking_api` never commits. `@Transactional` in `BookingService` commits on success and rolls back on any error, so the account lookup, the booking and the outbox event are one unit.
 - **Least privilege.** The service connects as `CORE_BANK_API`, which can log in and execute the two packages, nothing else. It cannot read or write a single table directly, so every change passes the checks in the packages.
+
+## Kafka
+
+The stack contains a single-node Kafka (KRaft, no ZooKeeper) and Kafka UI. Bookings leave the database as events, payment orders come in as messages. `docker compose up -d` starts everything; `docker compose up -d oracle` still starts only the database. Kafka uses PLAINTEXT without login and has no host port, so it is for the lab only.
+
+- Kafka UI: <http://127.0.0.1:8081>
+- Contract of all topics: [`api/asyncapi.yaml`](api/asyncapi.yaml) (AsyncAPI 3.0)
+
+| Topic | Direction | Key | Content |
+|---|---|---|---|
+| `core-banking.booking-events` | service → out | `bookingReference` | `BOOKING_CREATED` for each committed booking |
+| `core-banking.payment-orders` | in → service | free | order: `reference`, `fromAccountNumber`, `toAccountNumber`, `amount`, `currency` |
+| `core-banking.payment-results` | service → out | `reference` | `BOOKED`, `DUPLICATE` or `REJECTED` per order |
+| `core-banking.payment-orders.DLT` | service → ops | as original | orders that could not be processed (dead letters) |
+
+All topics have 3 partitions and 1 replica. Messages with the same key stay in one partition and therefore in order.
+
+### Booking events (transactional outbox)
+
+`booking_api` writes the event into `outbox_event` in the same transaction as the booking, so there is never a booking without an event or an event without a booking. The `OutboxPublisher` in the service reads unpublished events in order (`outbox_api.fetch_unpublished`, `FOR UPDATE SKIP LOCKED`), sends them with `acks=all`, waits for the acknowledgement and only then marks them as published and commits.
+
+```json
+{"eventId":"5f0c7fd6-22a9-0b68-e063-020014ac421e","eventType":"BOOKING_CREATED","schemaVersion":1,
+ "occurredAt":"2026-10-30T09:34:14.282Z","bookingReference":"DEP-0001","bookingType":"DEPOSIT",
+ "debitAccountNumber":"INT-1000","creditAccountNumber":"CUS-1001-01","amount":100,"currency":"CHF"}
+```
+
+The events contain business keys only (reference, account numbers), never internal IDs.
+
+**At-least-once, not exactly-once.** If the service dies after sending but before the commit, the same event is sent again. **Consumers must be idempotent and use `eventId`** (it is stored in the payload, so it is identical on every redelivery). There is also no global order across bookings, only per key.
+
+```bash
+# read the events
+docker exec cbl-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic core-banking.booking-events --from-beginning --property print.key=true
+```
+
+### Payment orders
+
+The service reads `core-banking.payment-orders` and books each order through the same service code as `POST /transfers` (one transaction). Every order gets a result on `core-banking.payment-results`:
+
+| Result | Meaning | Retry |
+|---|---|---|
+| `BOOKED` | transfer booked | |
+| `DUPLICATE` | the reference is already booked, nothing booked again | |
+| `REJECTED` + `errorCode` | business rule failed: `INSUFFICIENT_FUNDS`, `ACCOUNT_BLOCKED`, `CURRENCY_MISMATCH`, `ACCOUNT_NOT_FOUND`, `INVALID_AMOUNT`, `SAME_ACCOUNT`, or `INVALID_ORDER` (fields missing or invalid) | no, the answer would be the same |
+| technical error (database down, timeout) | no result yet | 3 retries (1 s, 2 s, 4 s), then the order goes to `...payment-orders.DLT` |
+| not JSON, or no `reference` | | no, straight to the DLT, no result |
+
+The `reference` makes the processing idempotent, so redelivery is harmless. One edge case: if the booking is committed but sending the result fails, the retry answers `DUPLICATE` instead of `BOOKED`. So `DUPLICATE` means "this reference is booked". A result that is never lost would have to go through the outbox as well.
+
+```bash
+# send an order (key|value)
+echo 'ORD-0001|{"reference":"ORD-0001","fromAccountNumber":"CUS-1001-01","toAccountNumber":"CUS-1002-01","amount":50.00,"currency":"CHF"}' | \
+  docker exec -i cbl-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 \
+    --topic core-banking.payment-orders --property parse.key=true --property key.separator='|'
+
+# read the results
+docker exec cbl-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic core-banking.payment-results --from-beginning --property print.key=true
+```
+
+### Monitoring: Kafka is not a hard dependency
+
+If Kafka is down, bookings via REST still work (payment orders cannot arrive, of course, and are processed once Kafka is back): the events wait in `outbox_event`, the publisher logs a warning every few seconds and delivers the backlog once Kafka is back. The health status of the service therefore stays `UP`.
+
+Instead of reporting the service as down, the backlog is monitored. It is visible at `GET /actuator/health/outbox` (the details are shown for this group only):
+
+```json
+{"status":"UP","components":{"outboxBacklog":{"status":"UP","details":{"unpublishedCount":1,"oldestAgeSeconds":14,"lagging":false,"warnAfterSeconds":300}}}}
+```
+
+Why not `DOWN`: a health check that fails on Kafka would make an orchestrator restart or remove a service that is perfectly able to book. That would turn a delay in the event stream into an outage of the core function. An alert on `oldestAgeSeconds` (here `lagging` once it exceeds 300 s) points at the real problem without that side effect. The database functions behind it are `outbox_api.unpublished_count` and `outbox_api.oldest_unpublished_age_seconds`.
 
 ## Roadmap
 
