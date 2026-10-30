@@ -7,13 +7,18 @@ PROMPT === Tabellen ===
 @@ddl/02_account.sql
 @@ddl/03_booking.sql
 @@ddl/04_booking_line.sql
+@@ddl/05_outbox_event.sql
 
 PROMPT === Stammdaten ===
 @@data/01_internal_accounts.sql
+@@data/02_internal_accounts_eur.sql
 
 PROMPT === Packages ===
+@@packages/bank_errors.pks
 @@packages/account_api.pks
 @@packages/account_api.pkb
+@@packages/booking_api.pks
+@@packages/booking_api.pkb
 
 PROMPT === Prüfung: ungültige Objekte ===
 DECLARE

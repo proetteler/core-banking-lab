@@ -14,7 +14,7 @@ AS
         RETURN v_balance;
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
-            RAISE_APPLICATION_ERROR(-20001, 'Konto ' || p_account_number || ' nicht gefunden');
+            RAISE_APPLICATION_ERROR(bank_errors.c_account_not_found,'Konto ' || p_account_number || ' nicht gefunden');
     END get_balance;
 
     PROCEDURE print_account (
