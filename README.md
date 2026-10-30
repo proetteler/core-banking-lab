@@ -4,6 +4,27 @@ A self-study project that rebuilds the core mechanics of a core banking system: 
 
 > **Disclaimer:** This is a personal learning project. It does not contain any Avaloq code or proprietary vendor internals. It only models publicly known banking and software concepts.
 
+## Status and roadmap
+
+This is a self-study project to prepare for integration roles around Avaloq. It contains no Avaloq code, only publicly known concepts. Parts of it were created with AI assistance, and I am rebuilding them step by step myself.
+
+**Done**
+- PL/SQL booking logic: double-entry bookkeeping, funds check, account locks, error concept
+- REST service with OpenAPI (Swagger UI)
+- Kafka: transactional outbox for booking events, payment orders with results and dead-letter topic
+- Least privilege: the service user can only execute the packages
+- Health and monitoring: health endpoint, outbox backlog
+
+**In progress**
+- Deployment on Kubernetes / OpenShift
+
+**Planned**
+- CI with GitHub Actions
+- Architecture documentation (arc42, ADRs)
+- Authentication (OAuth2)
+- utPLSQL tests
+- End-of-day processing
+
 ## Goals
 
 - Understand how a core banking system keeps money correct: every booking is balanced (debit = credit), and nothing is deleted, only reversed.
