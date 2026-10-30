@@ -8,5 +8,8 @@
 .vscode/*
 !.vscode/extensions.json
 
+# Build-Ausgabe des Services
+service/target/
+
 # Experiments
 scratch/
