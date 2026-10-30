@@ -36,11 +36,14 @@ docker compose up -d
 # 3. Wait until the database is ready
 docker compose logs oracle | grep "DATABASE IS READY TO USE"
 
-# 4. Install schema and seed data
+# 4. Create the database user of the integration service (as SYSTEM, once)
+docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "system/$ORACLE_PASSWORD@//localhost/FREEPDB1" @security/01_api_user.sql "$API_USER_PASSWORD"'
+
+# 5. Install schema, seed data, packages and grants
 docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_USER_PASSWORD@//localhost/FREEPDB1" @install.sql'
 ```
 
-The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order, stops at the first error and fails if any PL/SQL object is invalid.
+The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order, stops at the first error and fails if any PL/SQL object is invalid. Step 4 is separate because `CORE_BANK` is not allowed to create users; `install.sql` then grants `CORE_BANK_API` only `EXECUTE` on the packages.
 
 ### Demo data and smoke test
 
@@ -69,7 +72,7 @@ docker compose down      # stop the container, keep the data
 docker compose down -v   # stop the container and DELETE all data (fresh start)
 ```
 
-After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything from scratch.
+After `down -v`, repeat steps 2 to 5 of the quick start to rebuild everything from scratch.
 
 ## Project structure
 
@@ -86,6 +89,9 @@ After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything fr
 │   │   └── booking_api.pks / .pkb   # deposit, transfer
 │   ├── testdata/        # demo customers and accounts, loaded separately
 │   │   └── 01_demo_customers_accounts.sql
+│   ├── security/        # database user of the integration service
+│   │   ├── 01_api_user.sql    # creates CORE_BANK_API (run as SYSTEM, separate call)
+│   │   └── 02_api_grants.sql  # EXECUTE on the packages only (part of install.sql)
 │   ├── tests/
 │   │   └── smoke_test.sql   # prints SMOKE TEST OK, rolls back, exit code 1 on failure
 │   └── ddl/             # table definitions, run in numeric order
@@ -94,7 +100,8 @@ After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything fr
 │       ├── 03_booking.sql
 │       ├── 04_booking_line.sql
 │       └── 05_outbox_event.sql
-├── docker-compose.yml   # Oracle Database Free container
+├── service/             # Spring Boot integration service (REST in front of the packages)
+├── docker-compose.yml   # Oracle Database Free and the integration service
 ├── .env.example         # required environment variables (no secrets)
 └── CLAUDE.md            # working agreements for the AI coding assistant
 ```
@@ -108,6 +115,62 @@ customer 1 ── n account 1 ── n booking_line n ── 1 booking
 - `account`: customer accounts and internal bank accounts (e.g. cash, fee income)
 - `booking`: booking header (type, booking date, value date, unique reference, reversal link)
 - `booking_line`: one line per account, signed amount (debit +, credit −). The lines of a booking sum to 0.
+
+## Integration service
+
+A Spring Boot 3 / Java 21 service in `service/` that exposes the PL/SQL packages as a REST API. It contains no banking rules: it validates the request format, calls `booking_api` and `account_api` over JDBC and translates errors. Maven and the JDK are only used inside the build container, nothing has to be installed on the host.
+
+### Start
+
+```bash
+# needs API_USER_PASSWORD in .env and the database user from quick start step 4
+docker compose up -d --build     # builds the image (runs mvn verify), starts Oracle and the service
+curl -s http://127.0.0.1:8080/actuator/health
+```
+
+- Swagger UI: <http://127.0.0.1:8080/swagger-ui.html>, OpenAPI JSON: <http://127.0.0.1:8080/v3/api-docs>
+- The port is bound to `127.0.0.1` only. There is **no authentication yet**, so do not expose it.
+- Load the demo data first (see "Demo data and smoke test"), the examples use its accounts.
+
+### Examples
+
+```bash
+# balance
+curl -s http://127.0.0.1:8080/accounts/CUS-1001-01/balance
+
+# deposit
+curl -s -X POST http://127.0.0.1:8080/deposits -H 'Content-Type: application/json' \
+  -d '{"accountNumber":"CUS-1001-01","amount":1000.00,"currency":"CHF","reference":"DEP-0001"}'
+
+# transfer
+curl -s -X POST http://127.0.0.1:8080/transfers -H 'Content-Type: application/json' \
+  -d '{"fromAccountNumber":"CUS-1001-01","toAccountNumber":"CUS-1002-01","amount":300.00,"currency":"CHF","reference":"TRF-0001"}'
+```
+
+The `reference` is unique. Sending the same one again returns 409, so a client can safely retry after a timeout without booking twice.
+
+### Error codes
+
+Errors are returned as `application/problem+json` (RFC 9457) with the fields `type`, `status`, `detail` and `errorCode`. The mapping is based on the error numbers of the package `bank_errors` and lives in one place (`GlobalExceptionHandler`).
+
+| HTTP | `errorCode` | Cause |
+|---|---|---|
+| 400 | (validation) | Malformed request: missing field, amount ≤ 0 or more than 2 decimals, currency not 3 capital letters. Rejected before the database is called |
+| 404 | `ACCOUNT_NOT_FOUND` | Unknown account number |
+| 409 | `DUPLICATE_REFERENCE` | A booking with this reference exists |
+| 422 | `ACCOUNT_BLOCKED` | Debit on a blocked account, or any booking on a closed account |
+| 422 | `INSUFFICIENT_FUNDS` | Balance plus overdraft limit does not cover the amount |
+| 422 | `CURRENCY_MISMATCH` | Currency differs from the account currency |
+| 422 | `INVALID_AMOUNT`, `SAME_ACCOUNT` | Rules checked again in the database for other callers |
+| 500 | (none) | Anything else. The response has no internal details, the cause is only in the log |
+
+The `detail` text is fixed per error. The database message is not returned, because it can contain balances.
+
+### Design decisions
+
+- **Account numbers, not internal IDs.** The API identifies accounts by `accountNumber`, the business key. The internal ID is a surrogate key of the database. If it leaked, clients would depend on it and it could be guessed. The service resolves the number with `account_api.get_account_id` in the same transaction as the booking, `booking_api` keeps working with IDs.
+- **Transaction in the service.** `booking_api` never commits. `@Transactional` in `BookingService` commits on success and rolls back on any error, so the account lookup, the booking and the outbox event are one unit.
+- **Least privilege.** The service connects as `CORE_BANK_API`, which can log in and execute the two packages, nothing else. It cannot read or write a single table directly, so every change passes the checks in the packages.
 
 ## Roadmap
 
