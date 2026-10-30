@@ -42,6 +42,16 @@ docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_US
 
 The `db/` folder is mounted read-only into the container, and `install.sql` runs all scripts in order, stops at the first error and fails if any PL/SQL object is invalid.
 
+### Demo data and smoke test
+
+```bash
+# Load demo customers and accounts (once; not idempotent)
+docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_USER_PASSWORD@//localhost/FREEPDB1" @testdata/01_demo_customers_accounts.sql'
+
+# Run the smoke test (changes nothing, exits with code 1 on failure)
+docker exec -it -w /opt/cbl/db cbl-oracle bash -c 'sqlplus -s "$APP_USER/$APP_USER_PASSWORD@//localhost/FREEPDB1" @tests/smoke_test.sql'
+```
+
 ### Connect
 
 | Setting | Value |
@@ -68,15 +78,22 @@ After `down -v`, repeat steps 2 to 4 of the quick start to rebuild everything fr
 ├── db/
 │   ├── install.sql      # runs all scripts below in order, stops on errors or invalid objects
 │   ├── data/            # seed data (internal bank accounts)
-│   │   └── 01_internal_accounts.sql
+│   │   ├── 01_internal_accounts.sql
+│   │   └── 02_internal_accounts_eur.sql
 │   ├── packages/        # PL/SQL packages (spec .pks, body .pkb)
-│   │   ├── account_api.pks
-│   │   └── account_api.pkb
+│   │   ├── bank_errors.pks    # error numbers and named exceptions
+│   │   ├── account_api.pks / .pkb
+│   │   └── booking_api.pks / .pkb   # deposit, transfer
+│   ├── testdata/        # demo customers and accounts, loaded separately
+│   │   └── 01_demo_customers_accounts.sql
+│   ├── tests/
+│   │   └── smoke_test.sql   # prints SMOKE TEST OK, rolls back, exit code 1 on failure
 │   └── ddl/             # table definitions, run in numeric order
 │       ├── 01_customer.sql
 │       ├── 02_account.sql
 │       ├── 03_booking.sql
-│       └── 04_booking_line.sql
+│       ├── 04_booking_line.sql
+│       └── 05_outbox_event.sql
 ├── docker-compose.yml   # Oracle Database Free container
 ├── .env.example         # required environment variables (no secrets)
 └── CLAUDE.md            # working agreements for the AI coding assistant
