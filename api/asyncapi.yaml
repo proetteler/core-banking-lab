@@ -1,0 +1,210 @@
+asyncapi: 3.0.0
+info:
+  title: Core Banking Lab Events
+  version: 1.0.0
+  description: |
+    Kafka topics of the Core Banking Lab integration service.
+    Delivery is at-least-once: consumers must be idempotent (booking events by `eventId`,
+    payment orders by `reference`). Learning project, no vendor-specific content.
+
+servers:
+  local:
+    host: localhost:9092
+    protocol: kafka
+    description: Single-node broker of the Docker Compose stack (internal listener kafka:9092, PLAINTEXT)
+
+channels:
+  bookingEvents:
+    address: core-banking.booking-events
+    description: |
+      Published by the outbox publisher after a booking was committed.
+      Key = bookingReference, so all events of one booking stay in one partition and in order.
+    messages:
+      bookingCreated:
+        $ref: '#/components/messages/BookingCreated'
+  paymentOrders:
+    address: core-banking.payment-orders
+    description: |
+      Payment orders to be booked as transfers. Key is free; the order is identified by `reference`.
+      Technical failures are retried (1 s, 2 s, 4 s), then the message goes to core-banking.payment-orders.DLT.
+      Unreadable messages (no JSON, no reference) go to the DLT without retry.
+    messages:
+      paymentOrder:
+        $ref: '#/components/messages/PaymentOrder'
+  paymentResults:
+    address: core-banking.payment-results
+    description: One result per processed payment order. Key = reference.
+    messages:
+      paymentResult:
+        $ref: '#/components/messages/PaymentResult'
+  paymentOrdersDlt:
+    address: core-banking.payment-orders.DLT
+    description: |
+      Dead letters of payment-orders: the original message, plus Kafka headers with the exception.
+      No result event is sent for these messages.
+    messages:
+      deadLetter:
+        $ref: '#/components/messages/PaymentOrder'
+
+operations:
+  publishBookingEvents:
+    action: send
+    channel:
+      $ref: '#/channels/bookingEvents'
+    summary: Outbox publisher sends BOOKING_CREATED events
+  consumePaymentOrders:
+    action: receive
+    channel:
+      $ref: '#/channels/paymentOrders'
+    summary: Integration service books each order as a transfer
+  publishPaymentResults:
+    action: send
+    channel:
+      $ref: '#/channels/paymentResults'
+    summary: Integration service reports BOOKED, DUPLICATE or REJECTED
+  deadLetterPaymentOrders:
+    action: send
+    channel:
+      $ref: '#/channels/paymentOrdersDlt'
+    summary: Integration service parks messages it cannot process
+
+components:
+  messages:
+    BookingCreated:
+      name: BookingCreated
+      title: Booking created
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/BookingCreatedPayload'
+      examples:
+        - payload:
+            eventId: 0b1c7d52-3f0e-4c5a-9a55-2f6a1c3e8b10
+            eventType: BOOKING_CREATED
+            schemaVersion: 1
+            occurredAt: '2026-10-30T09:12:44.123Z'
+            bookingReference: DEP-0001
+            bookingType: DEPOSIT
+            debitAccountNumber: INT-1000
+            creditAccountNumber: CUS-1001-01
+            amount: 1000
+            currency: CHF
+    PaymentOrder:
+      name: PaymentOrder
+      title: Payment order
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/PaymentOrderPayload'
+      examples:
+        - payload:
+            reference: ORD-0001
+            fromAccountNumber: CUS-1001-01
+            toAccountNumber: CUS-1002-01
+            amount: 50.00
+            currency: CHF
+    PaymentResult:
+      name: PaymentResult
+      title: Payment result
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/PaymentResultPayload'
+      examples:
+        - payload:
+            eventId: 5d1e9f3a-7a54-4b8e-8c0e-1d2f3a4b5c6d
+            eventType: PAYMENT_RESULT
+            schemaVersion: 1
+            occurredAt: '2026-10-30T09:13:01.456Z'
+            reference: ORD-0002
+            status: REJECTED
+            errorCode: INSUFFICIENT_FUNDS
+
+  schemas:
+    BookingCreatedPayload:
+      type: object
+      required: [eventId, eventType, schemaVersion, occurredAt, bookingReference, bookingType,
+                 debitAccountNumber, creditAccountNumber, amount, currency]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Unique per event and identical on every redelivery. Use it for idempotency.
+        eventType:
+          type: string
+          const: BOOKING_CREATED
+        schemaVersion:
+          type: integer
+          const: 1
+        occurredAt:
+          type: string
+          format: date-time
+          description: UTC, millisecond precision
+        bookingReference:
+          type: string
+          maxLength: 50
+          description: Business key of the booking, also the Kafka key
+        bookingType:
+          type: string
+          enum: [DEPOSIT, TRANSFER]
+        debitAccountNumber:
+          type: string
+          description: Account debited (Soll). Account numbers only, no internal IDs.
+        creditAccountNumber:
+          type: string
+          description: Account credited (Haben)
+        amount:
+          type: number
+          exclusiveMinimum: 0
+          multipleOf: 0.01
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+    PaymentOrderPayload:
+      type: object
+      required: [reference, fromAccountNumber, toAccountNumber, amount, currency]
+      properties:
+        reference:
+          type: string
+          maxLength: 50
+          description: Unique per order. Sending the same reference again yields DUPLICATE.
+        fromAccountNumber:
+          type: string
+          maxLength: 20
+        toAccountNumber:
+          type: string
+          maxLength: 20
+        amount:
+          type: number
+          exclusiveMinimum: 0
+          multipleOf: 0.01
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+    PaymentResultPayload:
+      type: object
+      required: [eventId, eventType, schemaVersion, occurredAt, reference, status]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+          const: PAYMENT_RESULT
+        schemaVersion:
+          type: integer
+          const: 1
+        occurredAt:
+          type: string
+          format: date-time
+        reference:
+          type: string
+        status:
+          type: string
+          enum: [BOOKED, DUPLICATE, REJECTED]
+          description: |
+            BOOKED: the transfer was booked.
+            DUPLICATE: the reference is already booked, nothing was booked again.
+            REJECTED: refused for a business reason, a retry gives the same result.
+        errorCode:
+          type: string
+          description: Only with REJECTED
+          enum: [ACCOUNT_NOT_FOUND, ACCOUNT_BLOCKED, INSUFFICIENT_FUNDS, CURRENCY_MISMATCH,
+                 INVALID_AMOUNT, SAME_ACCOUNT, INVALID_ORDER]
